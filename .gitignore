@@ -1,3 +1,7 @@
 *.pyc
 *.swp
 *.swo
+**/.vscode/
+point.csv
+pose.csv
+pose.txt

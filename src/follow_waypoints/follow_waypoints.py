@@ -4,6 +4,7 @@ import threading
 import rospy
 import actionlib
 from smach import State,StateMachine
+from april_docking.msg import DockingAction, DockingGoal
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseArray ,PointStamped
 from std_msgs.msg import Empty
@@ -28,50 +29,59 @@ class FollowPath(State):
         self.duration = rospy.get_param('~wait_duration', 0.0)
         # Get a move_base action client
         self.client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
+        self.client_dock = actionlib.SimpleActionClient('docking', DockingAction)
         rospy.loginfo('Connecting to move_base...')
         self.client.wait_for_server()
         rospy.loginfo('Connected to move_base.')
         rospy.loginfo('Starting a tf listner.')
         self.tf = TransformListener()
         self.listener = tf.TransformListener()
-        self.distance_tolerance = rospy.get_param('waypoint_distance_tolerance', 0.0)
+        self.distance_tolerance = rospy.get_param('~waypoint_distance_tolerance', 0.0)
+        rospy.loginfo(self.frame_id + ',' + str(self.duration) + ',' + str(self.distance_tolerance))
 
     def execute(self, userdata):
         global waypoints
         # Execute waypoints each in sequence
-        for waypoint in waypoints:
+        for wp_type, waypoint in waypoints:
             # Break if preempted
             if waypoints == []:
                 rospy.loginfo('The waypoint queue has been reset.')
                 break
             # Otherwise publish next waypoint as goal
-            goal = MoveBaseGoal()
-            goal.target_pose.header.frame_id = self.frame_id
-            goal.target_pose.pose.position = waypoint.pose.pose.position
-            goal.target_pose.pose.orientation = waypoint.pose.pose.orientation
-            rospy.loginfo('Executing move_base goal to position (x,y): %s, %s' %
-                    (waypoint.pose.pose.position.x, waypoint.pose.pose.position.y))
-            rospy.loginfo("To cancel the goal: 'rostopic pub -1 /move_base/cancel actionlib_msgs/GoalID -- {}'")
-            self.client.send_goal(goal)
-            if not self.distance_tolerance > 0.0:
-                self.client.wait_for_result()
-                rospy.loginfo("Waiting for %f sec..." % self.duration)
-                time.sleep(self.duration)
-            else:
-                #This is the loop which exist when the robot is near a certain GOAL point.
-                distance = 10
-                while(distance > self.distance_tolerance):
-                    now = rospy.Time.now()
-                    self.listener.waitForTransform(self.odom_frame_id, self.base_frame_id, now, rospy.Duration(4.0))
-                    trans,rot = self.listener.lookupTransform(self.odom_frame_id,self.base_frame_id, now)
-                    distance = math.sqrt(pow(waypoint.pose.pose.position.x-trans[0],2)+pow(waypoint.pose.pose.position.y-trans[1],2))
+            if wp_type == "pose":
+                goal = MoveBaseGoal()
+                goal.target_pose.header.frame_id = self.frame_id
+                goal.target_pose.pose.position = waypoint.pose.pose.position
+                goal.target_pose.pose.orientation = waypoint.pose.pose.orientation
+                rospy.loginfo('Executing move_base goal to position (x,y): %s, %s' %
+                        (waypoint.pose.pose.position.x, waypoint.pose.pose.position.y))
+                rospy.loginfo("To cancel the goal: 'rostopic pub -1 /move_base/cancel actionlib_msgs/GoalID -- {}'")
+                self.client.send_goal(goal)
+                if not self.distance_tolerance > 0.0:
+                    self.client.wait_for_result()
+                    rospy.loginfo("Waiting for %f sec..." % self.duration)
+                    time.sleep(self.duration)
+                else:
+                    #This is the loop which exist when the robot is near a certain GOAL point.
+                    distance = float("inf")
+                    while(distance > self.distance_tolerance):
+                        now = rospy.Time.now()
+                        self.listener.waitForTransform(self.frame_id, self.base_frame_id, now, rospy.Duration(4.0))
+                        trans,rot = self.listener.lookupTransform(self.frame_id,self.base_frame_id, now)
+                        distance = math.sqrt(pow(waypoint.pose.pose.position.x-trans[0],2)+pow(waypoint.pose.pose.position.y-trans[1],2))
+            elif wp_type == "dock":
+                goal = DockingGoal()
+                goal.goalId = waypoint
+                self.client_dock.send_goal(goal)
+                self.client_dock.wait_for_result()
+                time.sleep(2.0)
         return 'success'
 
 def convert_PoseWithCovArray_to_PoseArray(waypoints):
     """Used to publish waypoints as pose array so that you can see them in rviz, etc."""
     poses = PoseArray()
     poses.header.frame_id = rospy.get_param('~goal_frame_id','map')
-    poses.poses = [pose.pose.pose for pose in waypoints]
+    poses.poses = [pose.pose.pose for wp_type, pose in waypoints if wp_type == "pose"]
     return poses
 
 class GetPath(State):
@@ -113,8 +123,9 @@ class GetPath(State):
             rospy.loginfo('Recieved path READY message')
             self.path_ready = True
             with open(output_file_path, 'w') as file:
-                for current_pose in waypoints:
-                    file.write(str(current_pose.pose.pose.position.x) + ',' + str(current_pose.pose.pose.position.y) + ',' + str(current_pose.pose.pose.position.z) + ',' + str(current_pose.pose.pose.orientation.x) + ',' + str(current_pose.pose.pose.orientation.y) + ',' + str(current_pose.pose.pose.orientation.z) + ',' + str(current_pose.pose.pose.orientation.w)+ '\n')
+                for wp_type, current_pose in waypoints:
+                    if wp_type == "pose":
+                        file.write(str(current_pose.pose.pose.position.x) + ',' + str(current_pose.pose.pose.position.y) + ',' + str(current_pose.pose.pose.position.z) + ',' + str(current_pose.pose.pose.orientation.x) + ',' + str(current_pose.pose.pose.orientation.y) + ',' + str(current_pose.pose.pose.orientation.z) + ',' + str(current_pose.pose.pose.orientation.w)+ '\n')
 	        rospy.loginfo('poses written to '+ output_file_path)	
         ready_thread = threading.Thread(target=wait_for_path_ready)
         ready_thread.start()
@@ -131,15 +142,18 @@ class GetPath(State):
                 reader = csv.reader(file, delimiter = ',')
                 for row in reader:
                     print row
-                    current_pose = PoseWithCovarianceStamped() 
-                    current_pose.pose.pose.position.x     =    float(row[0])
-                    current_pose.pose.pose.position.y     =    float(row[1])
-                    current_pose.pose.pose.position.z     =    float(row[2])
-                    current_pose.pose.pose.orientation.x = float(row[3])
-                    current_pose.pose.pose.orientation.y = float(row[4])
-                    current_pose.pose.pose.orientation.z = float(row[5])
-                    current_pose.pose.pose.orientation.w = float(row[6])
-                    waypoints.append(current_pose)
+                    if len(row) == 7:
+                        current_pose = PoseWithCovarianceStamped() 
+                        current_pose.pose.pose.position.x     =    float(row[0])
+                        current_pose.pose.pose.position.y     =    float(row[1])
+                        current_pose.pose.pose.position.z     =    float(row[2])
+                        current_pose.pose.pose.orientation.x = float(row[3])
+                        current_pose.pose.pose.orientation.y = float(row[4])
+                        current_pose.pose.pose.orientation.z = float(row[5])
+                        current_pose.pose.pose.orientation.w = float(row[6])
+                        waypoints.append(("pose", current_pose))
+                    elif len(row) == 1:
+                        waypoints.append(("dock", row[0]))
                     self.poseArray_publisher.publish(convert_PoseWithCovArray_to_PoseArray(waypoints))
             self.start_journey_bool = True
             
@@ -164,7 +178,7 @@ class GetPath(State):
                 else:
                     raise e
             rospy.loginfo("Recieved new waypoint")
-            waypoints.append(pose)
+            waypoints.append(("pose", pose))
             # publish waypoint queue as pose array so that you can see them in rviz, etc.
             self.poseArray_publisher.publish(convert_PoseWithCovArray_to_PoseArray(waypoints))
 
