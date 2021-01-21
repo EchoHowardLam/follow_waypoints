@@ -5,8 +5,10 @@ import rospy
 import actionlib
 from smach import State,StateMachine
 from april_docking.msg import DockingAction, DockingGoal
-from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+#from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
+from mbf_msgs.msg import MoveBaseAction, MoveBaseGoal
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseArray ,PointStamped
+from actionlib_msgs.msg import GoalStatus
 from std_msgs.msg import Empty
 from tf import TransformListener
 import tf
@@ -22,13 +24,14 @@ waypoints = []
 
 class FollowPath(State):
     def __init__(self):
-        State.__init__(self, outcomes=['success'], input_keys=['waypoints'])
+        State.__init__(self, outcomes=['success','failure'], input_keys=['waypoints'])
         self.frame_id = rospy.get_param('~goal_frame_id','map')
         self.odom_frame_id = rospy.get_param('~odom_frame_id','odom')
         self.base_frame_id = rospy.get_param('~base_frame_id','base_footprint')
         self.duration = rospy.get_param('~wait_duration', 0.0)
+        self.move_base_ns = rospy.get_param('~move_base_ns','move_base')
         # Get a move_base action client
-        self.client = actionlib.SimpleActionClient('move_base', MoveBaseAction)
+        self.client = actionlib.SimpleActionClient(self.move_base_ns, MoveBaseAction)
         self.client_dock = actionlib.SimpleActionClient('docking', DockingAction)
         rospy.loginfo('Connecting to move_base...')
         self.client.wait_for_server()
@@ -59,22 +62,50 @@ class FollowPath(State):
                 self.client.send_goal(goal)
                 if not self.distance_tolerance > 0.0:
                     self.client.wait_for_result()
-                    rospy.loginfo("Waiting for %f sec..." % self.duration)
-                    time.sleep(self.duration)
+                    result = self.client.get_state()
+                    if result == GoalStatus.SUCCEEDED:
+                        rospy.loginfo("Waiting for %f sec..." % self.duration)
+                        time.sleep(self.duration)
+                    else:
+                        rospy.loginfo("Reported to fail to reach the waypoint")
+                        return 'failure'
                 else:
                     #This is the loop which exist when the robot is near a certain GOAL point.
                     distance = float("inf")
                     while(distance > self.distance_tolerance):
-                        now = rospy.Time.now()
-                        self.listener.waitForTransform(self.frame_id, self.base_frame_id, now, rospy.Duration(4.0))
-                        trans,rot = self.listener.lookupTransform(self.frame_id,self.base_frame_id, now)
-                        distance = math.sqrt(pow(waypoint.pose.pose.position.x-trans[0],2)+pow(waypoint.pose.pose.position.y-trans[1],2))
+                        if self.client.wait_for_result(rospy.Duration(0.1)):
+                            result = self.client.get_state()
+                            if result == GoalStatus.SUCCEEDED:
+                                now = rospy.Time.now()
+                                self.listener.waitForTransform(self.frame_id, self.base_frame_id, now, rospy.Duration(4.0))
+                                trans,rot = self.listener.lookupTransform(self.frame_id,self.base_frame_id, now)
+                                distance = math.sqrt(pow(waypoint.pose.pose.position.x-trans[0],2)+pow(waypoint.pose.pose.position.y-trans[1],2))
+                                if distance > self.distance_tolerance:
+                                    rospy.loginfo("Claim to reach the waypoint but fail the tolerance test. Resending waypoint...")
+                                    self.client.send_goal(goal)
+                                else:
+                                    rospy.loginfo("Reported to reach the waypoint")
+                                    break
+                            else:
+                                rospy.loginfo("Reported to fail to reach the waypoint")
+                                return 'failure'
+                        else:
+                            now = rospy.Time.now()
+                            self.listener.waitForTransform(self.frame_id, self.base_frame_id, now, rospy.Duration(4.0))
+                            trans,rot = self.listener.lookupTransform(self.frame_id,self.base_frame_id, now)
+                            distance = math.sqrt(pow(waypoint.pose.pose.position.x-trans[0],2)+pow(waypoint.pose.pose.position.y-trans[1],2))
             elif wp_type == "dock":
                 goal = DockingGoal()
                 goal.goalId = waypoint
                 self.client_dock.send_goal(goal)
                 self.client_dock.wait_for_result()
-                time.sleep(2.0)
+                result = self.client_dock.get_state()
+                if result == GoalStatus.SUCCEEDED:
+                    rospy.loginfo("Wait for %f seconds..." % 4.0)
+                    time.sleep(4.0)
+                else:
+                    rospy.loginfo("Reported to fail to dock")
+                    return 'failure'
         return 'success'
 
 def convert_PoseWithCovArray_to_PoseArray(waypoints):
@@ -144,9 +175,9 @@ class GetPath(State):
                     print row
                     if len(row) == 7:
                         current_pose = PoseWithCovarianceStamped() 
-                        current_pose.pose.pose.position.x     =    float(row[0])
-                        current_pose.pose.pose.position.y     =    float(row[1])
-                        current_pose.pose.pose.position.z     =    float(row[2])
+                        current_pose.pose.pose.position.x    = float(row[0])
+                        current_pose.pose.pose.position.y    = float(row[1])
+                        current_pose.pose.pose.position.z    = float(row[2])
                         current_pose.pose.pose.orientation.x = float(row[3])
                         current_pose.pose.pose.orientation.y = float(row[4])
                         current_pose.pose.pose.orientation.z = float(row[5])
@@ -205,7 +236,7 @@ def main():
                            transitions={'success':'FOLLOW_PATH'},
                            remapping={'waypoints':'waypoints'})
         StateMachine.add('FOLLOW_PATH', FollowPath(),
-                           transitions={'success':'PATH_COMPLETE'},
+                           transitions={'success':'PATH_COMPLETE', 'failure':'PATH_COMPLETE'},
                            remapping={'waypoints':'waypoints'})
         StateMachine.add('PATH_COMPLETE', PathComplete(),
                            transitions={'success':'GET_PATH'})
