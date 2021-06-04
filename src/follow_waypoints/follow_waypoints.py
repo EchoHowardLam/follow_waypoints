@@ -7,7 +7,7 @@ from smach import State,StateMachine
 from april_docking.msg import DockingAction, DockingGoal
 #from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from mbf_msgs.msg import MoveBaseAction, MoveBaseGoal
-from geometry_msgs.msg import PoseWithCovarianceStamped, PoseArray ,PointStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseArray
 from actionlib_msgs.msg import GoalStatus
 from std_msgs.msg import Empty
 from tf import TransformListener
@@ -61,7 +61,8 @@ class FollowPath(State):
                 rospy.loginfo("To cancel the goal: 'rostopic pub -1 /move_base/cancel actionlib_msgs/GoalID -- {}'")
                 self.client.send_goal(goal)
                 if not self.distance_tolerance > 0.0:
-                    self.client.wait_for_result()
+                    while not self.client.wait_for_result(rospy.Duration(30.0)):
+                        self.client.send_goal(goal)
                     result = self.client.get_state()
                     if result == GoalStatus.SUCCEEDED:
                         rospy.loginfo("Waiting for %f sec..." % self.duration)
@@ -169,12 +170,14 @@ class GetPath(State):
             """thread worker function"""
             data_from_start_journey = rospy.wait_for_message('start_journey', Empty)
             rospy.loginfo('Recieved path READY start_journey')
+            global waypoints
+            waypoints = []
             with open(output_file_path, 'r') as file:
                 reader = csv.reader(file, delimiter = ',')
                 for row in reader:
-                    print row
+                    print(row)
                     if len(row) == 7:
-                        current_pose = PoseWithCovarianceStamped() 
+                        current_pose = PoseWithCovarianceStamped()
                         current_pose.pose.pose.position.x    = float(row[0])
                         current_pose.pose.pose.position.y    = float(row[1])
                         current_pose.pose.pose.position.z    = float(row[2])
