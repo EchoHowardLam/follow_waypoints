@@ -6,7 +6,7 @@ import actionlib
 from smach import State,StateMachine
 from april_docking.msg import DockingAction, DockingGoal
 #from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
-from mbf_msgs.msg import MoveBaseAction, MoveBaseGoal
+#from mbf_msgs.msg import MoveBaseAction, MoveBaseGoal
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseArray
 from actionlib_msgs.msg import GoalStatus
 from std_msgs.msg import Empty
@@ -29,8 +29,13 @@ class FollowPath(State):
         self.odom_frame_id = rospy.get_param('~odom_frame_id','odom')
         self.base_frame_id = rospy.get_param('~base_frame_id','base_footprint')
         self.duration = rospy.get_param('~wait_duration', 0.0)
+        self.move_base_type = rospy.get_param('~move_base_type','move_base')
         self.move_base_ns = rospy.get_param('~move_base_ns','move_base')
         # Get a move_base action client
+        if self.move_base_type == 'move_base':
+            from move_base_msgs.msg import MoveBaseAction
+        elif self.move_base_type == 'move_base_flex':
+            from mbf_msgs.msg import MoveBaseAction
         self.client = actionlib.SimpleActionClient(self.move_base_ns, MoveBaseAction)
         self.client_dock = actionlib.SimpleActionClient('docking', DockingAction)
         rospy.loginfo('Connecting to move_base...')
@@ -52,6 +57,10 @@ class FollowPath(State):
                 break
             # Otherwise publish next waypoint as goal
             if wp_type == "pose":
+                if self.move_base_type == 'move_base':
+                    from move_base_msgs.msg import MoveBaseGoal
+                elif self.move_base_type == 'move_base_flex':
+                    from mbf_msgs.msg import MoveBaseGoal
                 goal = MoveBaseGoal()
                 goal.target_pose.header.frame_id = self.frame_id
                 goal.target_pose.pose.position = waypoint.pose.pose.position
